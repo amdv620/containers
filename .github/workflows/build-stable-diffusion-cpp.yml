@@ -11,7 +11,7 @@ on:
 env:
   REGISTRY: ghcr.io
   # Pull the dev image we just built as our base
-  BASE_IMAGE_NAME: ${{ github.repository }}/dev
+  BASE_IMAGE_NAME: ${{ github.repository }}/rocm-dev
   FINAL_IMAGE_NAME: ${{ github.repository }}/stable-diffusion.cpp
 
 jobs:
