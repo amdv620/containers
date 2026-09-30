@@ -224,14 +224,14 @@ RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1 &
 #
 # SECONDARY FIX: The internal clang compiler inside ROCm needs the system's 
 # C++ standard library headers to compile HIP code (which is why it threw 
-# the 'cstdlib' file not found error). Installing `g++` and `libstdc++-dev` 
-# provides these headers.
+# the 'cstdlib' file not found error). Installing `g++` automatically pulls 
+# in the correct `libstdc++-14-dev` (or equivalent) version for Ubuntu 26.04.
+# (Removed `libstdc++-dev` as it is a virtual package without a direct candidate in 26.04).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     ninja-build \
     git \
     g++ \
-    libstdc++-dev \
     amdrocm-core-dev \
     amdrocm-blas-dev \
     amdrocm-hipblas-common-dev \
