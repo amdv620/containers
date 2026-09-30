@@ -21,9 +21,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
     HSA_OVERRIDE_GFX_VERSION=10.3.0 \
     CMAKE_BUILD_PARALLEL_LEVEL="8" \
     MAX_JOBS=4 \
-    # PyTorch ROCm handles memory efficient attention (Flash Attention equivalent) 
-    # automatically via MIOpen/aotriton in scaled_dot_product_attention.
-    # TORCH_CUDNN_SDPA_ENABLED=1 is NVIDIA-specific and ignored on ROCm.
     TORCH_CUDA_ARCH_LIST=""
 
 # ===========================================================================
@@ -138,10 +135,6 @@ RUN python3.12 -m pip install --no-cache-dir \
 # PyTorch 2.13's native SDPA (Scaled Dot Product Attention) automatically takes 
 # their place and provides identical O(N) memory efficiency via MIOpen.
 
-# Install standard packages normally. 
-# IMPORTANT: Removed --ignore-installed here! Using it forces pip to ignore the 
-# existing ROCm torch wheel and re-download the CPU/CUDA version from PyPI, 
-# silently breaking your entire GPU build!
 RUN python3.12 -m pip install --no-cache-dir \
     peft \
     trl \
@@ -166,9 +159,6 @@ RUN python3.12 -m pip install --no-cache-dir \
 RUN python3.12 -m pip install --no-cache-dir --no-deps bitsandbytes
 
 # Install optimum-amd without dependencies. 
-# The PyPI version of optimum-amd strictly requires onnxruntime<1.16.0, but 
-# onnxruntime < 1.16.0 has no Python 3.12 wheels, causing a complete pip crash!
-# Since you are training (not exporting to ONNX), onnxruntime isn't actually needed.
 RUN python3.12 -m pip install --no-cache-dir --no-deps optimum-amd
 
 # ===========================================================================
@@ -213,30 +203,30 @@ RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1 &
 # ===========================================================================
 # 10. STABLE-DIFFUSION.CPP (AMD RDNA2 ROCm HIP & Vulkan Backends)
 # ===========================================================================
-# Qwen-Image-2.1 and other diffusion models have Day-0 support in this project.
-# We build both the HIPBLAS (ROCm) and Vulkan backends. 
-# 
-# CRITICAL FIX: Your base image uses AMD's custom "packages-multi-arch" repository.
-# In this repo, standard Ubuntu packages like `hipblas-dev` and `rocblas-dev` 
-# DO NOT EXIST. They are replaced by the `amdrocm-*` package namespace.
-# We install `amdrocm-blas-dev`, `amdrocm-core-dev`, and `amdrocm-llvm-dev` 
-# (which contains the hipcc compiler) to satisfy CMake's requirements.
+# CRITICAL FIX 1: Your base image uses AMD's custom "packages-multi-arch" repository.
+# Standard Ubuntu packages like `hipblas-dev` DO NOT EXIST here. They are replaced 
+# by the `amdrocm-*` namespace. We install `amdrocm-blas-dev`, `amdrocm-core-dev`, 
+# `amdrocm-llvm-dev` (which contains the hipcc compiler), and `amdrocm-core-sdk`.
 #
-# SECONDARY FIX: The internal clang compiler inside ROCm needs the system's 
-# C++ standard library headers to compile HIP code (which is why it threw 
-# the 'cstdlib' file not found error). Installing `g++` automatically pulls 
-# in the correct `libstdc++-14-dev` (or equivalent) version for Ubuntu 26.04.
-# (Removed `libstdc++-dev` as it is a virtual package without a direct candidate in 26.04).
+# CRITICAL FIX 2 (The 'cstdlib' error): Ubuntu 26.04 (Resolute) ships with GCC 15 as default. 
+# ROCm 7.14's bundled Clang compiler (used by `hipcc`) strictly supports up to GCC 13/14. 
+# When `enable_language(HIP)` tests the compiler, it fails with "fatal error: 'cstdlib' 
+# file not found" because it refuses to parse the GCC 15 headers.
+# To fix this definitively, we explicitly install `gcc-12` and `libstdc++-12-dev`, and 
+# force CMake/hipcc to use the GCC 12 toolchain via `--gcc-toolchain`.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     ninja-build \
     git \
-    g++ \
+    gcc-12 \
+    g++-12 \
+    libstdc++-12-dev \
     amdrocm-core-dev \
     amdrocm-blas-dev \
     amdrocm-hipblas-common-dev \
     amdrocm-llvm-dev \
     amdrocm-hipify \
+    amdrocm-core-sdk \
     libvulkan-dev \
     glslang-tools \
     glslc \
@@ -249,16 +239,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libdrm-amdgpu1 \
     && rm -rf /var/lib/apt/lists/*
 
+# Set system default gcc/g++ to gcc-12 so any secondary tools default to the supported version
+RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 100 && \
+    update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-12 100 && \
+    update-alternatives --install /usr/bin/cc cc /usr/bin/gcc-12 100 && \
+    update-alternatives --install /usr/bin/c++ c++ /usr/bin/g++-12 100
+
 WORKDIR /workspace/stable-diffusion.cpp
 RUN git clone --recursive --depth 1 https://github.com/leejet/stable-diffusion.cpp.git . && \
     mkdir build && cd build && \
+    CC=gcc-12 CXX=g++-12 \
     cmake .. -G Ninja \
       -DCMAKE_BUILD_TYPE=Release \
       -DSD_HIPBLAS=ON \
       -DSD_VULKAN=ON \
       -DAMDGPU_TARGETS="gfx1030" \
       -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-      -DCMAKE_PREFIX_PATH="${ROCM_PATH}" && \
+      -DCMAKE_PREFIX_PATH="${ROCM_PATH}" \
+      -DCMAKE_HIP_FLAGS="--gcc-toolchain=/usr/lib/gcc/x86_64-linux-gnu/12" \
+      -DCMAKE_C_FLAGS="--gcc-toolchain=/usr/lib/gcc/x86_64-linux-gnu/12" \
+      -DCMAKE_CXX_FLAGS="--gcc-toolchain=/usr/lib/gcc/x86_64-linux-gnu/12" && \
     ninja
 
 # Symlink binaries to PATH
