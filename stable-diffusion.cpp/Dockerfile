@@ -221,10 +221,17 @@ RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1 &
 # DO NOT EXIST. They are replaced by the `amdrocm-*` package namespace.
 # We install `amdrocm-blas-dev`, `amdrocm-core-dev`, and `amdrocm-llvm-dev` 
 # (which contains the hipcc compiler) to satisfy CMake's requirements.
+#
+# SECONDARY FIX: The internal clang compiler inside ROCm needs the system's 
+# C++ standard library headers to compile HIP code (which is why it threw 
+# the 'cstdlib' file not found error). Installing `g++` and `libstdc++-dev` 
+# provides these headers.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     ninja-build \
     git \
+    g++ \
+    libstdc++-dev \
     amdrocm-core-dev \
     amdrocm-blas-dev \
     amdrocm-hipblas-common-dev \
