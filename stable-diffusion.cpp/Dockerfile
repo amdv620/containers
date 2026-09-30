@@ -1,5 +1,6 @@
 # syntax=docker/dockerfile:1.4
 
+# Add ARG to accept the base image dynamically (uses your C++ dev image)
 ARG BASE_IMAGE=dev
 FROM ${BASE_IMAGE}
 
@@ -14,13 +15,17 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PIP_BREAK_SYSTEM_PACKAGES=1 \
     ROCM_PATH=/opt/rocm \
+    # CRITICAL: Add ROCm binaries to PATH so CMake can find hipcc and clang++
+    PATH=/opt/rocm/bin:/opt/rocm/llvm/bin:${PATH} \
     CMAKE_PREFIX_PATH=/opt/rocm \
     LD_LIBRARY_PATH=/opt/rocm/lib \
     PYTORCH_ROCM_ARCH="gfx1030" \
     HSA_OVERRIDE_GFX_VERSION=10.3.0 \
     CMAKE_BUILD_PARALLEL_LEVEL="8" \
     MAX_JOBS=4 \
-    TORCH_CUDA_ARCH_LIST=""
+    TORCH_CUDA_ARCH_LIST="" \
+    # Force hipcc to use the system GCC toolchain explicitly
+    HIPCC_COMPILE_FLAGS_APPEND="--gcc-toolchain=/usr"
 
 # ===========================================================================
 # 1. SYSTEM DEPENDENCIES & PYTHON 3.12
@@ -192,19 +197,24 @@ RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1 &
 # ===========================================================================
 # 10. STABLE-DIFFUSION.CPP (AMD RDNA2 ROCm HIP & Vulkan Backends)
 # ===========================================================================
-# DEFINITIVE FIX: 
-# 1. Added `build-essential`: This strictly depends on `libc6-dev`. Because your base 
-#    image uses `--no-install-recommends`, `libc6-dev` (which provides /usr/include/stdio.h 
-#    and /usr/include/stdlib.h) was completely missing. This caused CMake to fail at 
-#    `project()` and `hipcc` to fail with `'cstdlib' file not found`.
-# 2. Added `gcc-14` and `g++-14`: Ubuntu 26.04 defaults to GCC 15. ROCm 7.14's bundled 
-#    Clang 23 compiler may fail to parse GCC 15 headers. We install GCC 14 and force 
-#    CMake to use it to ensure 100% compatibility.
+# DEFINITIVE FIXES FOR COMPILER ERRORS:
+# 1. Added `build-essential`: Fixes the `CMakeLists.txt:2 (project)` error by strictly 
+#    installing `libc6-dev` (which provides system headers like `/usr/include/stdio.h`), 
+#    bypassing the `--no-install-recommends` filter.
+# 2. Installed `gcc-13` & `g++-13`: Ubuntu 26.04 defaults to GCC 15. ROCm 7.14's bundled 
+#    Clang 23 (used by `hipcc`) cannot parse GCC 15's C++ headers, causing the 
+#    `fatal error: 'cstdlib' file not found` when testing the HIP compiler.
+# 3. Deleted `/usr/lib/gcc/x86_64-linux-gnu/15`: Clang scans this directory and automatically 
+#    picks the highest version. By deleting the GCC 15 directories, we force Clang to use 
+#    the fully supported GCC 13 toolchain.
+# 4. Added `/opt/rocm/bin` to `PATH`: CMake needs this to find `hipcc` for `enable_language(HIP)`.
+# 5. Added `HIPCC_COMPILE_FLAGS_APPEND`: Forces the hipcc wrapper to pass `--gcc-toolchain=/usr` 
+#    to the underlying Clang compiler for every invocation.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    gcc-14 \
-    g++-14 \
-    libstdc++-14-dev \
+    gcc-13 \
+    g++-13 \
+    libstdc++-13-dev \
     cmake \
     ninja-build \
     git \
@@ -226,16 +236,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libdrm-amdgpu1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Force the system to use GCC 14 so Clang 23 (hipcc) finds compatible headers
-RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100 && \
-    update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-14 100 && \
-    update-alternatives --install /usr/bin/cc cc /usr/bin/gcc-14 100 && \
-    update-alternatives --install /usr/bin/c++ c++ /usr/bin/g++-14 100
+# Remove GCC 15 to force Clang 23 (hipcc) to use GCC 13 headers
+RUN rm -rf /usr/lib/gcc/x86_64-linux-gnu/15 \
+           /usr/include/c++/15 \
+           /usr/lib/x86_64-linux-gnu/gcc/x86_64-linux-gnu/15
+
+# Set GCC 13 as the system default
+RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 100 && \
+    update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-13 100 && \
+    update-alternatives --install /usr/bin/cc cc /usr/bin/gcc-13 100 && \
+    update-alternatives --install /usr/bin/c++ c++ /usr/bin/g++-13 100
 
 WORKDIR /workspace/stable-diffusion.cpp
 RUN git clone --recursive --depth 1 https://github.com/leejet/stable-diffusion.cpp.git . && \
     mkdir build && cd build && \
-    CC=gcc-14 CXX=g++-14 \
+    CC=gcc-13 CXX=g++-13 \
     cmake .. -G Ninja \
       -DCMAKE_BUILD_TYPE=Release \
       -DSD_HIPBLAS=ON \
@@ -280,5 +295,8 @@ RUN python3.12 -c "import torch; print('✅ PyTorch:', torch.__version__, '| HIP
     python3.12 -c "import accelerate; print('✅ Accelerate:', accelerate.__version__)" && \
     ls /usr/local/bin/sd-cli && echo "✅ stable-diffusion.cpp (sd-cli) built successfully"
 
+# Expose standard ports for FastAPI/Model serving
 EXPOSE 8000 7860
+
+# Default command
 CMD ["/bin/bash"]
