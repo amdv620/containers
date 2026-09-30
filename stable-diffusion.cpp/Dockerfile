@@ -15,6 +15,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PIP_BREAK_SYSTEM_PACKAGES=1 \
     ROCM_PATH=/opt/rocm \
+    CMAKE_PREFIX_PATH=/opt/rocm \
     LD_LIBRARY_PATH=/opt/rocm/lib \
     PYTORCH_ROCM_ARCH="gfx1030" \
     HSA_OVERRIDE_GFX_VERSION=10.3.0 \
@@ -50,7 +51,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     jq \
     rsync \
     liblmdb-dev \
-    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python3.12 -m ensurepip --upgrade && \
@@ -215,15 +215,21 @@ RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1 &
 # ===========================================================================
 # Qwen-Image-2.1 and other diffusion models have Day-0 support in this project.
 # We build both the HIPBLAS (ROCm) and Vulkan backends. 
-# HIPBLAS provides native ROCm acceleration, while Vulkan acts as a highly 
-# compatible fallback. This requires the ROCm system toolkit (hipcc, etc.) 
-# to be present in your base image (which it is, given /opt/rocm).
+# 
+# CRITICAL FIX: Your base image uses AMD's custom "packages-multi-arch" repository.
+# In this repo, standard Ubuntu packages like `hipblas-dev` and `rocblas-dev` 
+# DO NOT EXIST. They are replaced by the `amdrocm-*` package namespace.
+# We install `amdrocm-blas-dev`, `amdrocm-core-dev`, and `amdrocm-llvm-dev` 
+# (which contains the hipcc compiler) to satisfy CMake's requirements.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     ninja-build \
     git \
-    hipblas-dev \
-    rocblas-dev \
+    amdrocm-core-dev \
+    amdrocm-blas-dev \
+    amdrocm-hipblas-common-dev \
+    amdrocm-llvm-dev \
+    amdrocm-hipify \
     libvulkan-dev \
     glslang-tools \
     glslc \
@@ -244,7 +250,8 @@ RUN git clone --recursive --depth 1 https://github.com/leejet/stable-diffusion.c
       -DSD_HIPBLAS=ON \
       -DSD_VULKAN=ON \
       -DAMDGPU_TARGETS="gfx1030" \
-      -DCMAKE_POSITION_INDEPENDENT_CODE=ON && \
+      -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+      -DCMAKE_PREFIX_PATH="${ROCM_PATH}" && \
     ninja
 
 # Symlink binaries to PATH
