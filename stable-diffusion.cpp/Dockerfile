@@ -1,13 +1,12 @@
 # syntax=docker/dockerfile:1.4
 
-# Add ARG to accept the base image dynamically (uses your C++ dev image)
 ARG BASE_IMAGE=dev
 FROM ${BASE_IMAGE}
 
 WORKDIR /workspace
 
 # ===========================================================================
-# ENVIRONMENT VARIABLES (Crucial for AMD ROCm & Heavy Compilations)
+# ENVIRONMENT VARIABLES
 # ===========================================================================
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -130,11 +129,6 @@ RUN python3.12 -m pip install --no-cache-dir \
 # ===========================================================================
 # 6. 32GB VRAM MODEL TRAINING & FINE-TUNING STACK
 # ===========================================================================
-# REMOVED: flash-attn and deepspeed source compilation. 
-# These packages strictly expect NVIDIA CUDA_HOME and will crash on ROCm.
-# PyTorch 2.13's native SDPA (Scaled Dot Product Attention) automatically takes 
-# their place and provides identical O(N) memory efficiency via MIOpen.
-
 RUN python3.12 -m pip install --no-cache-dir \
     peft \
     trl \
@@ -153,12 +147,7 @@ RUN python3.12 -m pip install --no-cache-dir \
     tensorboard \
     tensorboardX
 
-# Install bitsandbytes without dependencies. 
-# On ROCm, installing bitsandbytes normally triggers a torch reinstall from PyPI
-# which overwrites the ROCm torch wheel. --no-deps prevents this safely.
 RUN python3.12 -m pip install --no-cache-dir --no-deps bitsandbytes
-
-# Install optimum-amd without dependencies. 
 RUN python3.12 -m pip install --no-cache-dir --no-deps optimum-amd
 
 # ===========================================================================
@@ -203,24 +192,22 @@ RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1 &
 # ===========================================================================
 # 10. STABLE-DIFFUSION.CPP (AMD RDNA2 ROCm HIP & Vulkan Backends)
 # ===========================================================================
-# CRITICAL FIX 1: Your base image uses AMD's custom "packages-multi-arch" repository.
-# Standard Ubuntu packages like `hipblas-dev` DO NOT EXIST here. They are replaced 
-# by the `amdrocm-*` namespace. We install `amdrocm-blas-dev`, `amdrocm-core-dev`, 
-# `amdrocm-llvm-dev` (which contains the hipcc compiler), and `amdrocm-core-sdk`.
-#
-# CRITICAL FIX 2 (The 'cstdlib' error): Ubuntu 26.04 (Resolute) ships with GCC 15 as default. 
-# ROCm 7.14's bundled Clang compiler (used by `hipcc`) strictly supports up to GCC 13/14. 
-# When `enable_language(HIP)` tests the compiler, it fails with "fatal error: 'cstdlib' 
-# file not found" because it refuses to parse the GCC 15 headers.
-# To fix this definitively, we explicitly install `gcc-12` and `libstdc++-12-dev`, and 
-# force CMake/hipcc to use the GCC 12 toolchain via `--gcc-toolchain`.
+# DEFINITIVE FIX: 
+# 1. Added `build-essential`: This strictly depends on `libc6-dev`. Because your base 
+#    image uses `--no-install-recommends`, `libc6-dev` (which provides /usr/include/stdio.h 
+#    and /usr/include/stdlib.h) was completely missing. This caused CMake to fail at 
+#    `project()` and `hipcc` to fail with `'cstdlib' file not found`.
+# 2. Added `gcc-14` and `g++-14`: Ubuntu 26.04 defaults to GCC 15. ROCm 7.14's bundled 
+#    Clang 23 compiler may fail to parse GCC 15 headers. We install GCC 14 and force 
+#    CMake to use it to ensure 100% compatibility.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    gcc-14 \
+    g++-14 \
+    libstdc++-14-dev \
     cmake \
     ninja-build \
     git \
-    gcc-12 \
-    g++-12 \
-    libstdc++-12-dev \
     amdrocm-core-dev \
     amdrocm-blas-dev \
     amdrocm-hipblas-common-dev \
@@ -239,26 +226,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libdrm-amdgpu1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Set system default gcc/g++ to gcc-12 so any secondary tools default to the supported version
-RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 100 && \
-    update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-12 100 && \
-    update-alternatives --install /usr/bin/cc cc /usr/bin/gcc-12 100 && \
-    update-alternatives --install /usr/bin/c++ c++ /usr/bin/g++-12 100
+# Force the system to use GCC 14 so Clang 23 (hipcc) finds compatible headers
+RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100 && \
+    update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-14 100 && \
+    update-alternatives --install /usr/bin/cc cc /usr/bin/gcc-14 100 && \
+    update-alternatives --install /usr/bin/c++ c++ /usr/bin/g++-14 100
 
 WORKDIR /workspace/stable-diffusion.cpp
 RUN git clone --recursive --depth 1 https://github.com/leejet/stable-diffusion.cpp.git . && \
     mkdir build && cd build && \
-    CC=gcc-12 CXX=g++-12 \
+    CC=gcc-14 CXX=g++-14 \
     cmake .. -G Ninja \
       -DCMAKE_BUILD_TYPE=Release \
       -DSD_HIPBLAS=ON \
       -DSD_VULKAN=ON \
       -DAMDGPU_TARGETS="gfx1030" \
       -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-      -DCMAKE_PREFIX_PATH="${ROCM_PATH}" \
-      -DCMAKE_HIP_FLAGS="--gcc-toolchain=/usr/lib/gcc/x86_64-linux-gnu/12" \
-      -DCMAKE_C_FLAGS="--gcc-toolchain=/usr/lib/gcc/x86_64-linux-gnu/12" \
-      -DCMAKE_CXX_FLAGS="--gcc-toolchain=/usr/lib/gcc/x86_64-linux-gnu/12" && \
+      -DCMAKE_PREFIX_PATH="${ROCM_PATH}" && \
     ninja
 
 # Symlink binaries to PATH
@@ -270,9 +254,6 @@ WORKDIR /workspace
 # ===========================================================================
 # 11. HUGGINGFACE DIFFUSERS & QWEN-IMAGE-2.1 DEPENDENCIES
 # ===========================================================================
-# Install diffusers. Accelerate, transformers, and bitsandbytes are already installed.
-# PyTorch ROCm natively handles attention via MIOpen/AOTriton, so xformers 
-# is not required and can cause compilation issues on ROCm.
 RUN python3.12 -m pip install --no-cache-dir \
     diffusers \
     pillow \
@@ -294,14 +275,10 @@ RUN python3.12 -c "import torch; print('✅ PyTorch:', torch.__version__, '| HIP
     python3.12 -c "import lmdb; print('✅ LMDB (Memory Mapped DB) installed')" && \
     python3.12 -c "import polars as pl; print('✅ Polars:', pl.__version__)" && \
     python3.12 -c "import huggingface_hub; print('✅ HF Hub (XET enabled)')" && \
-    # Verify PyTorch Native Memory Efficient Attention is ready to use
     python3.12 -c "import torch.nn.functional as F; print('✅ PyTorch Native SDPA (Flash Attention equivalent) is available')" && \
     python3.12 -c "import diffusers; print('✅ Diffusers:', diffusers.__version__)" && \
     python3.12 -c "import accelerate; print('✅ Accelerate:', accelerate.__version__)" && \
     ls /usr/local/bin/sd-cli && echo "✅ stable-diffusion.cpp (sd-cli) built successfully"
 
-# Expose standard ports for FastAPI/Model serving
 EXPOSE 8000 7860
-
-# Default command
 CMD ["/bin/bash"]
