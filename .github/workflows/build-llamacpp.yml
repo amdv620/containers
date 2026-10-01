@@ -1,4 +1,4 @@
-name: Build Llama.cpp Source Image
+name: Llama.cpp Source Image
 
 on:
   workflow_dispatch:
@@ -12,7 +12,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  BASE_IMAGE_NAME: ${{ github.repository_owner }}/rocm-base
+  BASE_IMAGE_NAME: ${{ github.repository_owner }}/rocm-10x-base
   FINAL_IMAGE_NAME: ${{ github.repository }}/llama-cpp
 
 jobs:

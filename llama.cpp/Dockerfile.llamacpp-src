@@ -1,5 +1,5 @@
 # Add ARG to accept the base image dynamically
-ARG BASE_IMAGE=rocm-base
+ARG BASE_IMAGE=rocm-10x-base
 FROM ${BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -7,20 +7,19 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Fix GitHub Issue #25807: 
 # Recent ROCm packaging sometimes fails to register /opt/rocm/lib with the dynamic loader.
 # Prepending this ensures libhipblas.so and other ROCm libs are found at runtime.
-ENV LD_LIBRARY_PATH=/opt/rocm/core-7.14/lib:$LD_LIBRARY_PATH
+ENV LD_LIBRARY_PATH=/opt/rocm/core-10.0/lib:$LD_LIBRARY_PATH
 
 WORKDIR /app
 
 ################################################################################
-# MAINLINE BUILD (Commented out - uncomment to use standard llama.cpp instead)
+# MAINLINE BUILD: llama.cpp upstream source repository
 ################################################################################
-# llama.cpp repository instead of the RDNA2 fork.
 
 RUN rm -rf /app/llama.cpp
 RUN git clone --depth 1 https://github.com/ggml-org/llama.cpp.git /app/llama.cpp
 WORKDIR /app/llama.cpp
 
-RUN LD_LIBRARY_PATH=/opt/rocm/core-7.14/lib:$LD_LIBRARY_PATH \
+RUN LD_LIBRARY_PATH=/opt/rocm/core-10.0/lib:$LD_LIBRARY_PATH \
     HSA_OVERRIDE_GFX_VERSION=10.3.0 \
     HIPCXX="$(hipconfig -l)/clang" \
     HIP_PATH="$(hipconfig -R)" \
