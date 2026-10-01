@@ -12,7 +12,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/rocm-10x-base
+  IMAGE_NAME: ${{ github.repository_owner }}/rocm-base-10
 
 jobs:
   build-and-push:
