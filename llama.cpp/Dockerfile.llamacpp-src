@@ -1,5 +1,5 @@
 # Add ARG to accept the base image dynamically
-ARG BASE_IMAGE=rocm-10x-base
+ARG BASE_IMAGE=rocm-base-10
 FROM ${BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive

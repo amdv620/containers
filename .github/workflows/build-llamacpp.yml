@@ -6,13 +6,12 @@ on:
     - cron: '0 0 * * *' # Runs every day at Midnight UTC
   push:
     paths:
-      - 'llama.cpp/**'
-      - 'llama.cpp/*'
+      - 'llama.cpp/Dockerfile.llamacpp-src'
       - '.github/workflows/build-llama-cpp.yml'
 
 env:
   REGISTRY: ghcr.io
-  BASE_IMAGE_NAME: ${{ github.repository_owner }}/rocm-10x-base
+  BASE_IMAGE_NAME: ${{ github.repository_owner }}/rocm-base-10
   FINAL_IMAGE_NAME: ${{ github.repository }}/llama-cpp
 
 jobs:

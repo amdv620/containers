@@ -1,4 +1,4 @@
-name: Build Llama.cpp Navi21 Fork Image
+name: Llama.cpp Navi21 Fork Image
 
 on:
   workflow_dispatch:
@@ -6,13 +6,12 @@ on:
   #  - cron: '0 0 * * *' # Runs every day at Midnight UTC
   push:
     paths:
-      - 'llama.cpp/**'
-      - 'llama.cpp/*'
+      - 'llama.cpp/Dockerfile.llamacpp-navi21'
       - '.github/workflows/build-llamacpp-navi21.yml'
 
 env:
   REGISTRY: ghcr.io
-  BASE_IMAGE_NAME: ${{ github.repository_owner }}/rocm-base
+  BASE_IMAGE_NAME: ${{ github.repository_owner }}/rocm-base-10
   FINAL_IMAGE_NAME: ${{ github.repository }}/llama-cpp-navi21
 
 jobs:
