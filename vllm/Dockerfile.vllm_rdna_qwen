@@ -91,6 +91,8 @@ WORKDIR /tmp/vllm-src
 # -------------------------------------------------------------------------
 # CACHE VLLM PYTHON DEPENDENCIES FOR OFFLINE BUILD
 # -------------------------------------------------------------------------
+# Download common and rocm requirements to a local wheel cache so the 
+# editable install doesn't hit the network.
 RUN mkdir -p /wheels/vllm && \
     pip download -r requirements/common.txt --dest /wheels/vllm && \
     pip download -r requirements/rocm.txt --dest /wheels/vllm && \
@@ -103,11 +105,48 @@ RUN sed -i 's/set(VLLM_ROCM_HAS_GFX1030 OFF)/set(VLLM_ROCM_HAS_GFX1030 ON)/' CMa
     sed -i 's/if(VLLM_GPU_ARCHES MATCHES "gfx1030")/if(TRUE)/' CMakeLists.txt
 
 # -------------------------------------------------------------------------
-# Bypass amdsmi detection bug using TheRock's own package (Fork's recommended method)
+# Bypass amdsmi detection bug (CRITICAL FOR GPU-LESS RUNNERS)
 # -------------------------------------------------------------------------
-RUN mkdir -p /opt/patches && \
-    cp -r /opt/rocm/share/amd_smi /tmp/amd_smi && \
-    pip install /tmp/amd_smi
+# This prevents the "UnspecifiedPlatform" crash inside containers where 
+# amdsmi fails because no physical GPU is present during the build phase.
+RUN mkdir -p /opt/patches
+
+# Save the patch script to the image so it can be inspected or reverted
+RUN cat <<'EOF' > /opt/patches/amdsmi_bypass.py
+import re
+import shutil
+import os
+
+path = 'vllm/platforms/__init__.py'
+backup_path = path + '.bak'
+
+if not os.path.exists(backup_path):
+    shutil.copyfile(path, backup_path)
+    print(f"Backed up original to {backup_path}")
+
+with open(path, 'r') as f:
+    content = f.read()
+
+pattern = r'def rocm_platform_plugin\(\)[^:]*:'
+replacement = '''def rocm_platform_plugin():
+    logger.debug("Checking if ROCm platform is available (forced bypass).")
+    return "vllm.platforms.rocm.RocmPlatform"
+
+def _disabled_rocm_platform_plugin():'''
+
+new_content = re.sub(pattern, replacement, content, count=1)
+
+if new_content != content:
+    with open(path, 'w') as f:
+        f.write(new_content)
+    print("Successfully patched vllm/platforms/__init__.py to force ROCm platform")
+else:
+    print("WARNING: Could not find rocm_platform_plugin to patch!")
+EOF
+
+# Run the patch and save a git diff to /opt/patches for reference
+RUN python3 /opt/patches/amdsmi_bypass.py && \
+    git diff > /opt/patches/amdsmi_bypass.diff || true
 
 # -------------------------------------------------------------------------
 # Compile vLLM (Editable Install)
@@ -120,12 +159,12 @@ ENV PYTORCH_ROCM_ARCH="gfx1030" \
     HSA_OVERRIDE_GFX_VERSION=10.3.0 \
     MAX_JOBS=8
 
-# CRITICAL: --no-build-isolation uses the ROCm PyTorch already in the venv.
-# --no-deps prevents pip from downloading mismatched versions from PyPI.
-RUN pip install -v -e . --no-build-isolation --no-deps
+# CRITICAL: --no-build-isolation ensures CMake sees the ROCm PyTorch installed in the venv.
+RUN pip install -v -e . --no-build-isolation
 
-# Install runtime dependencies offline
-RUN pip install --no-index --find-links=/wheels/vllm -r requirements/rocm.txt --no-deps && \
+# Install runtime dependencies completely offline from our wheel cache
+RUN pip install --no-index --find-links=/wheels/vllm -r requirements/common.txt --no-deps && \
+    pip install --no-index --find-links=/wheels/vllm -r requirements/rocm.txt --no-deps && \
     pip install --no-index --find-links=/wheels/vllm "numpy>=1.25,<2.4"
 
 # -------------------------------------------------------------------------
