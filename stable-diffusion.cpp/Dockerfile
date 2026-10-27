@@ -1,6 +1,5 @@
 # syntax=docker/dockerfile:1.4
 
-# Add ARG to accept the base image dynamically (uses your C++ dev image)
 ARG BASE_IMAGE=dev
 FROM ${BASE_IMAGE}
 
@@ -23,10 +22,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
     CMAKE_BUILD_PARALLEL_LEVEL="8" \
     MAX_JOBS=4 \
     TORCH_CUDA_ARCH_LIST="" \
-    # CRITICAL: Force hipcc to use the GCC 14 toolchain explicitly to bypass 
-    # GCC 15 header incompatibilities with ROCm 7.14's Clang 23.
-    HIPCC_COMPILE_FLAGS_APPEND="--gcc-toolchain=/usr/lib/gcc/x86_64-linux-gnu/14" \
-    HIPCC_LINK_FLAGS_APPEND="--gcc-toolchain=/usr/lib/gcc/x86_64-linux-gnu/14"
+    # CRITICAL FIX: Force Clang to use the exact GCC 14 installation path.
+    # This prevents Clang from auto-detecting and failing on unsupported GCC 15 headers.
+    HIPCC_COMPILE_FLAGS_APPEND="--gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/14 --gcc-toolchain=/usr" \
+    HIPCC_LINK_FLAGS_APPEND="--gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/14 --gcc-toolchain=/usr"
 
 # ===========================================================================
 # 1. SYSTEM DEPENDENCIES & PYTHON 3.12
@@ -78,7 +77,7 @@ RUN python3.12 -m pip install --ignore-installed --upgrade pip setuptools wheel 
     --extra-index-url https://pypi.org/simple/
 
 # ===========================================================================
-# 3-9. PYTHON PACKAGES (Unchanged)
+# 3-9. PYTHON PACKAGES
 # ===========================================================================
 RUN python3.12 -m pip install --no-cache-dir \
     tiktoken tokenizers sentencepiece fasttext sacremoses ftfy clean-text \
@@ -101,16 +100,19 @@ RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1 &
     ln -sf /usr/bin/python3.12 /usr/bin/python
 
 # ===========================================================================
-# 10. CRITICAL FIXES FOR CLOUD BUILDERS (NO GPU) & COMPILER HEADERS
+# 10. THE DEFINITIVE TOOLCHAIN & HEADLESS CI FIXES
 # ===========================================================================
-# FIX A: GCC 15 Incompatibility
-# ROCm 7.14's Clang 23 cannot parse GCC 15 C++ headers (fatal error: 'cstdlib' not found).
-# We install GCC 14 and force Clang to use the GCC 14 toolchain via environment variables.
+# FIX A: The 'cmath' / 'cstdlib' Missing Header Bug
+# ROCm 7.14's Clang 23 auto-scans /usr/include/c++ and picks the highest GCC version.
+# If GCC 15/16 headers are present, Clang tries to use them and fails because they 
+# are not yet supported, resulting in "Could not find standard C++ header 'cmath'".
+# We install GCC 14 headers and Nuke any newer versions to force Clang to use GCC 14.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     gcc-14 \
     g++-14 \
     libstdc++-14-dev \
+    libstdc++-13-dev \
     cmake \
     ninja-build \
     git \
@@ -132,17 +134,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libdrm-amdgpu1 \
     && rm -rf /var/lib/apt/lists/*
 
+# Nuke unsupported GCC headers that confuse ROCm's Clang
+RUN rm -rf /usr/include/c++/15 /usr/include/c++/16 \
+           /usr/lib/gcc/x86_64-linux-gnu/15 /usr/lib/gcc/x86_64-linux-gnu/16
+
+# Set GCC 14 as the system default
 RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100 && \
     update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-14 100 && \
     update-alternatives --install /usr/bin/cc cc /usr/bin/gcc-14 100 && \
     update-alternatives --install /usr/bin/c++ c++ /usr/bin/g++-14 100
 
 # FIX B: The "Cloud Builder / No-GPU" Offload-Arch Bug
-# ROCm installs GPU detection tools like `offload-arch` and `rocm_agent_enumerator` in 
-# /opt/rocm/core-7.14/bin/ and links them via update-alternatives. In a headless Docker 
-# container, these fail and crash CMake's enable_language(HIP) step.
-# FIX: Find and overwrite the ACTUAL binaries inside /opt/rocm with a dummy script that 
-# simply outputs "gfx1030" and exits cleanly.
+# Overwrite the actual GPU detection binaries inside /opt/rocm with a dummy script.
+# This prevents CMake's enable_language(HIP) from crashing when no physical GPU is present.
 RUN echo -e '#!/bin/bash\necho "gfx1030"' > /usr/local/bin/dummy_gpu_arch && \
     chmod +x /usr/local/bin/dummy_gpu_arch && \
     find /opt/rocm /usr/bin -type f \( -name "offload-arch" -o -name "amdgpu-arch" -o -name "rocm_agent_enumerator" \) -exec cp /usr/local/bin/dummy_gpu_arch {} \;
@@ -150,7 +154,6 @@ RUN echo -e '#!/bin/bash\necho "gfx1030"' > /usr/local/bin/dummy_gpu_arch && \
 WORKDIR /workspace/stable-diffusion.cpp
 RUN git clone --recursive --depth 1 https://github.com/leejet/stable-diffusion.cpp.git . && \
     mkdir build && cd build && \
-    # Use GCC 14 as the host compiler
     CC=gcc-14 CXX=g++-14 \
     cmake .. -G Ninja \
       -DCMAKE_BUILD_TYPE=Release \
@@ -159,7 +162,12 @@ RUN git clone --recursive --depth 1 https://github.com/leejet/stable-diffusion.c
       -DGPU_TARGETS="gfx1030" \
       -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
       -DCMAKE_PREFIX_PATH="/opt/rocm;/opt/rocm/llvm" \
-      # Bypass CMake's fragile HIP compiler test, which often crashes in headless CI environments
+      # CRITICAL: Explicitly tell CMake to use hipcc. If CMake uses raw clang++, 
+      # it ignores the HIPCC_COMPILE_FLAGS_APPEND environment variable.
+      -DCMAKE_HIP_COMPILER=/opt/rocm/bin/hipcc \
+      # Inject the toolchain flags directly into CMAKE_HIP_FLAGS as a failsafe
+      -DCMAKE_HIP_FLAGS="--gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/14 --gcc-toolchain=/usr" \
+      # Bypass CMake's fragile HIP compiler test which crashes in headless CI
       -DCMAKE_HIP_COMPILER_WORKS=TRUE \
       && ninja
 
