@@ -21,11 +21,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     HSA_OVERRIDE_GFX_VERSION=10.3.0 \
     CMAKE_BUILD_PARALLEL_LEVEL="8" \
     MAX_JOBS=4 \
-    TORCH_CUDA_ARCH_LIST="" \
-    # CRITICAL FIX: Force Clang to use the exact GCC 14 installation path.
-    # This prevents Clang from auto-detecting and failing on unsupported GCC 15 headers.
-    HIPCC_COMPILE_FLAGS_APPEND="--gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/14 --gcc-toolchain=/usr" \
-    HIPCC_LINK_FLAGS_APPEND="--gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/14 --gcc-toolchain=/usr"
+    TORCH_CUDA_ARCH_LIST=""
 
 # ===========================================================================
 # 1. SYSTEM DEPENDENCIES & PYTHON 3.12
@@ -102,11 +98,6 @@ RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1 &
 # ===========================================================================
 # 10. THE DEFINITIVE TOOLCHAIN & HEADLESS CI FIXES
 # ===========================================================================
-# FIX A: The 'cmath' / 'cstdlib' Missing Header Bug
-# ROCm 7.14's Clang 23 auto-scans /usr/include/c++ and picks the highest GCC version.
-# If GCC 15/16 headers are present, Clang tries to use them and fails because they 
-# are not yet supported, resulting in "Could not find standard C++ header 'cmath'".
-# We install GCC 14 headers and Nuke any newer versions to force Clang to use GCC 14.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     gcc-14 \
@@ -145,8 +136,6 @@ RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100 && \
     update-alternatives --install /usr/bin/c++ c++ /usr/bin/g++-14 100
 
 # FIX B: The "Cloud Builder / No-GPU" Offload-Arch Bug
-# Overwrite the actual GPU detection binaries inside /opt/rocm with a dummy script.
-# This prevents CMake's enable_language(HIP) from crashing when no physical GPU is present.
 RUN echo -e '#!/bin/bash\necho "gfx1030"' > /usr/local/bin/dummy_gpu_arch && \
     chmod +x /usr/local/bin/dummy_gpu_arch && \
     find /opt/rocm /usr/bin -type f \( -name "offload-arch" -o -name "amdgpu-arch" -o -name "rocm_agent_enumerator" \) -exec cp /usr/local/bin/dummy_gpu_arch {} \;
@@ -154,6 +143,9 @@ RUN echo -e '#!/bin/bash\necho "gfx1030"' > /usr/local/bin/dummy_gpu_arch && \
 WORKDIR /workspace/stable-diffusion.cpp
 RUN git clone --recursive --depth 1 https://github.com/leejet/stable-diffusion.cpp.git . && \
     mkdir build && cd build && \
+    # Dynamically extract the exact C++ include paths for g++-14
+    # because ROCm's clang++ frequently fails to auto-detect them in Docker
+    CXX_INC_PATHS=$(g++-14 -Wp,-v -x c++ -E - < /dev/null 2>&1 | grep '^ ' | sed 's/^ */-isystem /' | tr '\n' ' ') && \
     CC=gcc-14 CXX=g++-14 \
     cmake .. -G Ninja \
       -DCMAKE_BUILD_TYPE=Release \
@@ -162,16 +154,14 @@ RUN git clone --recursive --depth 1 https://github.com/leejet/stable-diffusion.c
       -DGPU_TARGETS="gfx1030" \
       -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
       -DCMAKE_PREFIX_PATH="/opt/rocm;/opt/rocm/llvm" \
-      # CRITICAL: Explicitly tell CMake to use hipcc. If CMake uses raw clang++, 
-      # it ignores the HIPCC_COMPILE_FLAGS_APPEND environment variable.
-      -DCMAKE_HIP_COMPILER=/opt/rocm/bin/hipcc \
-      # Inject the toolchain flags directly into CMAKE_HIP_FLAGS as a failsafe
-      -DCMAKE_HIP_FLAGS="--gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/14 --gcc-toolchain=/usr" \
+      -DCMAKE_HIP_COMPILER=/opt/rocm/llvm/bin/clang++ \
+      # Inject the dynamically discovered GCC 14 include paths via -isystem
+      # alongside the --gcc-toolchain flags. This guarantees Clang finds <cstdlib> and <cmath>.
+      -DCMAKE_HIP_FLAGS="${CXX_INC_PATHS} --gcc-toolchain=/usr --gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/14" \
       # Bypass CMake's fragile HIP compiler test which crashes in headless CI
       -DCMAKE_HIP_COMPILER_WORKS=TRUE \
       && ninja
 
-# Symlink binaries to PATH
 RUN ln -s /workspace/stable-diffusion.cpp/build/bin/sd-cli /usr/local/bin/sd-cli && \
     ln -s /workspace/stable-diffusion.cpp/build/bin/sd-server /usr/local/bin/sd-server || true
 
