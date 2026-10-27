@@ -138,30 +138,14 @@ RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100 && \
     update-alternatives --install /usr/bin/c++ c++ /usr/bin/g++-14 100
 
 # FIX B: The "Cloud Builder / No-GPU" Offload-Arch Bug
-# When building in Docker without a GPU, CMake's enable_language(HIP) runs 
-# `offload-arch` and `amdgpu-arch`. These tools fail and output an error to STDERR.
-# CMake incorrectly captures this STDERR and bakes it into CMAKE_HIP_FLAGS as a 
-# literal compiler flag. This mangled string appears in every ninja compile command,
-# causing clang++ to fail with "2 errors generated when compiling for gfx1030".
-# FIX: Replace these tools with dummy scripts that simply echo "gfx1030" and exit 0.
-RUN echo -e '#!/bin/bash\necho "gfx1030"' > /usr/local/bin/offload-arch && \
-    echo -e '#!/bin/bash\necho "gfx1030"' > /usr/local/bin/amdgpu-arch && \
-    echo -e '#!/bin/bash\necho "gfx1030"' > /usr/local/bin/rocm_agent_enumerator && \
-    chmod +x /usr/local/bin/offload-arch /usr/local/bin/amdgpu-arch /usr/local/bin/rocm_agent_enumerator
-
-# Overwrite ROCm's internal binaries just in case CMake calls them directly via absolute path
-RUN if [ -d "/opt/rocm/bin" ]; then \
-        cp /usr/local/bin/offload-arch /opt/rocm/bin/offload-arch && \
-        cp /usr/local/bin/amdgpu-arch /opt/rocm/bin/amdgpu-arch && \
-        cp /usr/local/bin/rocm_agent_enumerator /opt/rocm/bin/rocm_agent_enumerator && \
-        chmod +x /opt/rocm/bin/offload-arch /opt/rocm/bin/amdgpu-arch /opt/rocm/bin/rocm_agent_enumerator; \
-    fi
-
-RUN if [ -d "/opt/rocm/llvm/bin" ]; then \
-        cp /usr/local/bin/offload-arch /opt/rocm/llvm/bin/offload-arch && \
-        cp /usr/local/bin/amdgpu-arch /opt/rocm/llvm/bin/amdgpu-arch && \
-        chmod +x /opt/rocm/llvm/bin/offload-arch /opt/rocm/llvm/bin/amdgpu-arch; \
-    fi
+# ROCm installs GPU detection tools like `offload-arch` and `rocm_agent_enumerator` in 
+# /opt/rocm/core-7.14/bin/ and links them via update-alternatives. In a headless Docker 
+# container, these fail and crash CMake's enable_language(HIP) step.
+# FIX: Find and overwrite the ACTUAL binaries inside /opt/rocm with a dummy script that 
+# simply outputs "gfx1030" and exits cleanly.
+RUN echo -e '#!/bin/bash\necho "gfx1030"' > /usr/local/bin/dummy_gpu_arch && \
+    chmod +x /usr/local/bin/dummy_gpu_arch && \
+    find /opt/rocm /usr/bin -type f \( -name "offload-arch" -o -name "amdgpu-arch" -o -name "rocm_agent_enumerator" \) -exec cp /usr/local/bin/dummy_gpu_arch {} \;
 
 WORKDIR /workspace/stable-diffusion.cpp
 RUN git clone --recursive --depth 1 https://github.com/leejet/stable-diffusion.cpp.git . && \
@@ -175,11 +159,7 @@ RUN git clone --recursive --depth 1 https://github.com/leejet/stable-diffusion.c
       -DGPU_TARGETS="gfx1030" \
       -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
       -DCMAKE_PREFIX_PATH="/opt/rocm;/opt/rocm/llvm" \
-      # Force Clang to use GCC 14 toolchain headers (fixes 'cstdlib' not found)
-      -DCMAKE_C_FLAGS="--gcc-toolchain=/usr/lib/gcc/x86_64-linux-gnu/14" \
-      -DCMAKE_CXX_FLAGS="--gcc-toolchain=/usr/lib/gcc/x86_64-linux-gnu/14" \
-      -DCMAKE_HIP_FLAGS="--gcc-toolchain=/usr/lib/gcc/x86_64-linux-gnu/14" \
-      # Bypass CMake's HIP compiler test, which often crashes in headless CI environments
+      # Bypass CMake's fragile HIP compiler test, which often crashes in headless CI environments
       -DCMAKE_HIP_COMPILER_WORKS=TRUE \
       && ninja
 
