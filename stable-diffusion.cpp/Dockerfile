@@ -15,17 +15,18 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PIP_BREAK_SYSTEM_PACKAGES=1 \
     ROCM_PATH=/opt/rocm \
-    # CRITICAL: Add ROCm binaries to PATH so CMake can find hipcc and clang++
     PATH=/opt/rocm/bin:/opt/rocm/llvm/bin:${PATH} \
-    CMAKE_PREFIX_PATH=/opt/rocm \
+    CMAKE_PREFIX_PATH=/opt/rocm:/opt/rocm/llvm \
     LD_LIBRARY_PATH=/opt/rocm/lib \
     PYTORCH_ROCM_ARCH="gfx1030" \
     HSA_OVERRIDE_GFX_VERSION=10.3.0 \
     CMAKE_BUILD_PARALLEL_LEVEL="8" \
     MAX_JOBS=4 \
     TORCH_CUDA_ARCH_LIST="" \
-    # Force hipcc to use the system GCC toolchain explicitly
-    HIPCC_COMPILE_FLAGS_APPEND="--gcc-toolchain=/usr"
+    # CRITICAL: Force hipcc to use the GCC 14 toolchain explicitly to bypass 
+    # GCC 15 header incompatibilities with ROCm 7.14's Clang 23.
+    HIPCC_COMPILE_FLAGS_APPEND="--gcc-toolchain=/usr/lib/gcc/x86_64-linux-gnu/14" \
+    HIPCC_LINK_FLAGS_APPEND="--gcc-toolchain=/usr/lib/gcc/x86_64-linux-gnu/14"
 
 # ===========================================================================
 # 1. SYSTEM DEPENDENCIES & PYTHON 3.12
@@ -77,144 +78,39 @@ RUN python3.12 -m pip install --ignore-installed --upgrade pip setuptools wheel 
     --extra-index-url https://pypi.org/simple/
 
 # ===========================================================================
-# 3. THE "BLINGFIRE" EQUIVALENTS & NLP PIPELINE
+# 3-9. PYTHON PACKAGES (Unchanged)
 # ===========================================================================
 RUN python3.12 -m pip install --no-cache-dir \
-    tiktoken \
-    tokenizers \
-    sentencepiece \
-    fasttext \
-    sacremoses \
-    ftfy \
-    clean-text \
-    unidecode \
-    spacy \
-    nltk \
-    gensim \
-    langdetect
-
-# ===========================================================================
-# 4. PRE-TRAINING DATA CLEANING & DEDUPLICATION
-# ===========================================================================
-RUN python3.12 -m pip install --no-cache-dir \
-    datasketch \
-    trafilatura \
-    beautifulsoup4 \
-    lxml \
-    html5lib \
-    scrubadub
-
-# ===========================================================================
-# 5. "IN-MEMORY" DBs, FORMATS & DATA STREAMING
-# ===========================================================================
-RUN python3.12 -m pip install --no-cache-dir \
-    lmdb \
-    diskcache \
-    orjson \
-    ujson \
-    msgspec \
-    jsonlines \
-    ruamel.yaml \
-    polars \
-    pyarrow \
-    fastparquet \
-    pandas \
-    openpyxl \
-    duckdb \
-    webdataset \
-    litdata \
-    smart_open[s3,gcs] \
-    zstandard \
-    lz4 \
-    blosc \
-    snappy \
-    py7zr \
-    brotli
-
-# ===========================================================================
-# 6. 32GB VRAM MODEL TRAINING & FINE-TUNING STACK
-# ===========================================================================
-RUN python3.12 -m pip install --no-cache-dir \
-    peft \
-    trl \
-    transformers \
-    datasets \
-    accelerate \
-    optimum \
-    safetensors \
-    outlines \
-    lm-eval \
-    rouge-score \
-    bert-score \
-    sacrebleu \
-    evaluate \
-    wandb \
-    tensorboard \
-    tensorboardX
+    tiktoken tokenizers sentencepiece fasttext sacremoses ftfy clean-text \
+    unidecode spacy nltk gensim langdetect datasketch trafilatura \
+    beautifulsoup4 lxml html5lib scrubadub lmdb diskcache orjson ujson \
+    msgspec jsonlines ruamel.yaml polars pyarrow fastparquet pandas \
+    openpyxl duckdb webdataset litdata "smart_open[s3,gcs]" zstandard \
+    lz4 blosc snappy py7zr brotli peft trl transformers datasets \
+    accelerate optimum safetensors outlines lm-eval rouge-score \
+    bert-score sacrebleu evaluate wandb tensorboard tensorboardX \
+    fastapi uvicorn pydantic pydantic-settings httpx requests urllib3 \
+    rich tqdm click typer matplotlib seaborn plotly pytest pytest-cov \
+    ruff black mypy isort pre-commit setuptools-rust "huggingface_hub[hf_xet]"
 
 RUN python3.12 -m pip install --no-cache-dir --no-deps bitsandbytes
 RUN python3.12 -m pip install --no-cache-dir --no-deps optimum-amd
 
-# ===========================================================================
-# 7. GENERAL PYTHON ENGINEERING, APIS, & CODE QUALITY
-# ===========================================================================
-RUN python3.12 -m pip install --no-cache-dir \
-    fastapi \
-    uvicorn \
-    pydantic \
-    pydantic-settings \
-    httpx \
-    requests \
-    urllib3 \
-    rich \
-    tqdm \
-    click \
-    typer \
-    matplotlib \
-    seaborn \
-    plotly \
-    pytest \
-    pytest-cov \
-    ruff \
-    black \
-    mypy \
-    isort \
-    pre-commit \
-    setuptools-rust
-
-# ===========================================================================
-# 8. HUGGINGFACE XET (Next-Gen Model Fetching)
-# ===========================================================================
-RUN python3.12 -m pip install --no-cache-dir "huggingface_hub[hf_xet]"
-
-# ===========================================================================
-# 9. MAKE PYTHON 3.12 THE DEFAULT
-# ===========================================================================
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1 && \
     update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1 && \
     ln -sf /usr/bin/python3.12 /usr/bin/python
 
 # ===========================================================================
-# 10. STABLE-DIFFUSION.CPP (AMD RDNA2 ROCm HIP & Vulkan Backends)
+# 10. CRITICAL FIXES FOR CLOUD BUILDERS (NO GPU) & COMPILER HEADERS
 # ===========================================================================
-# DEFINITIVE FIXES FOR COMPILER ERRORS:
-# 1. Added `build-essential`: Fixes the `CMakeLists.txt:2 (project)` error by strictly 
-#    installing `libc6-dev` (which provides system headers like `/usr/include/stdio.h`), 
-#    bypassing the `--no-install-recommends` filter.
-# 2. Installed `gcc-13` & `g++-13`: Ubuntu 26.04 defaults to GCC 15. ROCm 7.14's bundled 
-#    Clang 23 (used by `hipcc`) cannot parse GCC 15's C++ headers, causing the 
-#    `fatal error: 'cstdlib' file not found` when testing the HIP compiler.
-# 3. Deleted `/usr/lib/gcc/x86_64-linux-gnu/15`: Clang scans this directory and automatically 
-#    picks the highest version. By deleting the GCC 15 directories, we force Clang to use 
-#    the fully supported GCC 13 toolchain.
-# 4. Added `/opt/rocm/bin` to `PATH`: CMake needs this to find `hipcc` for `enable_language(HIP)`.
-# 5. Added `HIPCC_COMPILE_FLAGS_APPEND`: Forces the hipcc wrapper to pass `--gcc-toolchain=/usr` 
-#    to the underlying Clang compiler for every invocation.
+# FIX A: GCC 15 Incompatibility
+# ROCm 7.14's Clang 23 cannot parse GCC 15 C++ headers (fatal error: 'cstdlib' not found).
+# We install GCC 14 and force Clang to use the GCC 14 toolchain via environment variables.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    gcc-13 \
-    g++-13 \
-    libstdc++-13-dev \
+    gcc-14 \
+    g++-14 \
+    libstdc++-14-dev \
     cmake \
     ninja-build \
     git \
@@ -236,29 +132,56 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libdrm-amdgpu1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Remove GCC 15 to force Clang 23 (hipcc) to use GCC 13 headers
-RUN rm -rf /usr/lib/gcc/x86_64-linux-gnu/15 \
-           /usr/include/c++/15 \
-           /usr/lib/x86_64-linux-gnu/gcc/x86_64-linux-gnu/15
+RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100 && \
+    update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-14 100 && \
+    update-alternatives --install /usr/bin/cc cc /usr/bin/gcc-14 100 && \
+    update-alternatives --install /usr/bin/c++ c++ /usr/bin/g++-14 100
 
-# Set GCC 13 as the system default
-RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 100 && \
-    update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-13 100 && \
-    update-alternatives --install /usr/bin/cc cc /usr/bin/gcc-13 100 && \
-    update-alternatives --install /usr/bin/c++ c++ /usr/bin/g++-13 100
+# FIX B: The "Cloud Builder / No-GPU" Offload-Arch Bug
+# When building in Docker without a GPU, CMake's enable_language(HIP) runs 
+# `offload-arch` and `amdgpu-arch`. These tools fail and output an error to STDERR.
+# CMake incorrectly captures this STDERR and bakes it into CMAKE_HIP_FLAGS as a 
+# literal compiler flag. This mangled string appears in every ninja compile command,
+# causing clang++ to fail with "2 errors generated when compiling for gfx1030".
+# FIX: Replace these tools with dummy scripts that simply echo "gfx1030" and exit 0.
+RUN echo -e '#!/bin/bash\necho "gfx1030"' > /usr/local/bin/offload-arch && \
+    echo -e '#!/bin/bash\necho "gfx1030"' > /usr/local/bin/amdgpu-arch && \
+    echo -e '#!/bin/bash\necho "gfx1030"' > /usr/local/bin/rocm_agent_enumerator && \
+    chmod +x /usr/local/bin/offload-arch /usr/local/bin/amdgpu-arch /usr/local/bin/rocm_agent_enumerator
+
+# Overwrite ROCm's internal binaries just in case CMake calls them directly via absolute path
+RUN if [ -d "/opt/rocm/bin" ]; then \
+        cp /usr/local/bin/offload-arch /opt/rocm/bin/offload-arch && \
+        cp /usr/local/bin/amdgpu-arch /opt/rocm/bin/amdgpu-arch && \
+        cp /usr/local/bin/rocm_agent_enumerator /opt/rocm/bin/rocm_agent_enumerator && \
+        chmod +x /opt/rocm/bin/offload-arch /opt/rocm/bin/amdgpu-arch /opt/rocm/bin/rocm_agent_enumerator; \
+    fi
+
+RUN if [ -d "/opt/rocm/llvm/bin" ]; then \
+        cp /usr/local/bin/offload-arch /opt/rocm/llvm/bin/offload-arch && \
+        cp /usr/local/bin/amdgpu-arch /opt/rocm/llvm/bin/amdgpu-arch && \
+        chmod +x /opt/rocm/llvm/bin/offload-arch /opt/rocm/llvm/bin/amdgpu-arch; \
+    fi
 
 WORKDIR /workspace/stable-diffusion.cpp
 RUN git clone --recursive --depth 1 https://github.com/leejet/stable-diffusion.cpp.git . && \
     mkdir build && cd build && \
-    CC=gcc-13 CXX=g++-13 \
+    # Use GCC 14 as the host compiler
+    CC=gcc-14 CXX=g++-14 \
     cmake .. -G Ninja \
       -DCMAKE_BUILD_TYPE=Release \
       -DSD_HIPBLAS=ON \
       -DSD_VULKAN=ON \
-      -DAMDGPU_TARGETS="gfx1030" \
+      -DGPU_TARGETS="gfx1030" \
       -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-      -DCMAKE_PREFIX_PATH="${ROCM_PATH}" && \
-    ninja
+      -DCMAKE_PREFIX_PATH="/opt/rocm;/opt/rocm/llvm" \
+      # Force Clang to use GCC 14 toolchain headers (fixes 'cstdlib' not found)
+      -DCMAKE_C_FLAGS="--gcc-toolchain=/usr/lib/gcc/x86_64-linux-gnu/14" \
+      -DCMAKE_CXX_FLAGS="--gcc-toolchain=/usr/lib/gcc/x86_64-linux-gnu/14" \
+      -DCMAKE_HIP_FLAGS="--gcc-toolchain=/usr/lib/gcc/x86_64-linux-gnu/14" \
+      # Bypass CMake's HIP compiler test, which often crashes in headless CI environments
+      -DCMAKE_HIP_COMPILER_WORKS=TRUE \
+      && ninja
 
 # Symlink binaries to PATH
 RUN ln -s /workspace/stable-diffusion.cpp/build/bin/sd-cli /usr/local/bin/sd-cli && \
@@ -295,8 +218,5 @@ RUN python3.12 -c "import torch; print('✅ PyTorch:', torch.__version__, '| HIP
     python3.12 -c "import accelerate; print('✅ Accelerate:', accelerate.__version__)" && \
     ls /usr/local/bin/sd-cli && echo "✅ stable-diffusion.cpp (sd-cli) built successfully"
 
-# Expose standard ports for FastAPI/Model serving
 EXPOSE 8000 7860
-
-# Default command
 CMD ["/bin/bash"]
